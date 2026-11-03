@@ -31,3 +31,12 @@ export type RouteMatch =
 
 /** Options TCP passées au serveur natif Deno, avec une écoute locale par défaut. */
 export type ServeOptions = Deno.ServeTcpOptions & Deno.ServeOptions;
+
+/** Continue la chaîne et récupère sa réponse. À appeler et attendre une seule fois. */
+export type Next = () => Promise<Response>;
+
+/**
+ * Entoure la suite du traitement. Renvoie une Response, ou appelle await next().
+ * Les paramètres de route sont déjà disponibles ; les 404 et 405 passent aussi ici.
+ */
+export type Middleware = (context: Context, next: Next) => Response | Promise<Response>;

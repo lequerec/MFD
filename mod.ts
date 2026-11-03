@@ -8,7 +8,13 @@ export type {
   Handler,
   HandlerResult,
   HttpMethod,
+  Middleware,
+  Next,
   Route,
   RouteMatch,
   ServeOptions,
 } from "./src/types.ts";
+export { logger } from "./src/middlewares/logger.ts";
+export type { LogEntry, LoggerOptions } from "./src/middlewares/logger.ts";
+export { cors } from "./src/middlewares/cors.ts";
+export type { CorsOptions } from "./src/middlewares/cors.ts";

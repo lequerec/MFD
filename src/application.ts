@@ -3,7 +3,7 @@ import { Context } from "./context.ts";
 import { HttpError } from "./http-error.ts";
 import { toResponse } from "./response.ts";
 import { normalizePath, Router } from "./router.ts";
-import type { ServeOptions } from "./types.ts";
+import type { Middleware, RouteMatch, ServeOptions } from "./types.ts";
 
 /**
  * Assemble les controllers et traite les requêtes, avec ou sans serveur réseau.
@@ -18,6 +18,28 @@ import type { ServeOptions } from "./types.ts";
  */
 export class Application {
   private readonly router = new Router();
+  private readonly middlewares: Middleware[] = [];
+
+  /** Ajoute un middleware global. Le premier enregistré entoure tous les suivants. */
+  use(middleware: Middleware): this {
+    if (typeof middleware !== "function") {
+      throw new TypeError("Un middleware doit être une fonction.");
+    }
+    this.middlewares.push(middleware);
+    return this;
+  }
+
+  /** Convertit une erreur en réponse avant de remonter la chaîne. */
+  private errorResponse(error: unknown): Response {
+    if (error instanceof HttpError) {
+      return Response.json({ status: error.status, message: error.message }, {
+        status: error.status,
+        headers: error.headers,
+      });
+    }
+    console.error("[MFD] Erreur pendant le traitement d'une requête :", error);
+    return Response.json({ status: 500, message: "Erreur interne du serveur" }, { status: 500 });
+  }
 
   /** Enregistre les routes d'un controller et renvoie l'application pour chaîner les appels. */
   register(controller: Controller): this {
@@ -37,27 +59,43 @@ export class Application {
    * Les erreurs inattendues sont journalisées côté serveur, sans détail envoyé au client.
    */
   readonly fetch = async (request: Request): Promise<Response> => {
-    let response: Response;
+    let match: RouteMatch | undefined;
+    let routingError: unknown;
     try {
-      const match = this.router.resolve(request.method, new URL(request.url).pathname);
-      if (match.kind === "not-found") throw new HttpError(404, "Route introuvable");
-      if (match.kind === "method-not-allowed") {
-        throw new HttpError(405, "Méthode non autorisée", { Allow: match.allowed.join(", ") });
-      }
-      response = toResponse(await match.handler(new Context(request, match.params)));
+      match = this.router.resolve(request.method, new URL(request.url).pathname);
     } catch (error) {
-      if (error instanceof HttpError) {
-        response = Response.json({ status: error.status, message: error.message }, {
-          status: error.status,
-          headers: error.headers,
-        });
-      } else {
-        console.error("[MFD] Erreur pendant le traitement d'une requête :", error);
-        response = Response.json({ status: 500, message: "Erreur interne du serveur" }, {
-          status: 500,
-        });
-      }
+      routingError = error;
     }
+    const context = new Context(request, match?.kind === "matched" ? match.params : {});
+    // Une requête en cours garde sa chaîne, même si use() est appelé entre-temps.
+    const middlewares = [...this.middlewares];
+    const dispatch = async (index: number): Promise<Response> => {
+      try {
+        const middleware = middlewares[index];
+        if (middleware) {
+          let called = false;
+          const response = await middleware(context, () => {
+            if (called) throw new Error("next() ne peut être appelé qu'une fois par middleware.");
+            called = true;
+            return dispatch(index + 1);
+          });
+          if (!(response instanceof Response)) {
+            throw new TypeError("Un middleware doit renvoyer une Response.");
+          }
+          return response;
+        }
+        if (routingError) throw routingError;
+        if (!match || match.kind === "not-found") throw new HttpError(404, "Route introuvable");
+        if (match.kind === "method-not-allowed") {
+          throw new HttpError(405, "Méthode non autorisée", { Allow: match.allowed.join(", ") });
+        }
+        return toResponse(await match.handler(context));
+      } catch (error) {
+        // Chaque étage convertit ses erreurs : les middlewares extérieurs voient la réponse.
+        return this.errorResponse(error);
+      }
+    };
+    const response = await dispatch(0);
     if (request.method === "HEAD") {
       await response.body?.cancel();
       return new Response(null, {

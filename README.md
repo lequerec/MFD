@@ -1,13 +1,13 @@
 # MFD - Mini Framework Deno
 
-**Version 0.1.0 - TypeScript - Deno 2 - Aucune dépendance externe**
+**Version 0.2.0 - TypeScript - Deno 2 - Aucune dépendance externe**
 
 MFD, c'est un petit framework pour créer des API avec Deno. L'idée : garder le côté structuré de
 Nest, des classes, des controllers, des responsabilités claires, avec une prise en main toute
 simple.
 
-On déclare ses routes, on écrit ses handlers et on démarre le serveur. Pour cette première version,
-on se concentre sur le coeur HTTP. Le reste viendra quand on en aura besoin.
+On déclare ses routes, on écrit ses handlers et on démarre le serveur. La v0.2.0 ajoute des
+middlewares pour entourer ce traitement, avec un logger et du CORS prêts à utiliser.
 
 ## Les classes principales
 
@@ -18,13 +18,14 @@ on se concentre sur le coeur HTTP. Le reste viendra quand on en aura besoin.
 - Des réponses JSON automatiques et la possibilité de renvoyer sa propre `Response`.
 - Des erreurs HTTP centralisées, dont les réponses `404`, `405` et `500`.
 - Un traitement de `HEAD`, des handlers asynchrones et des tests sans port réseau.
+- Des middlewares globaux avec `app.use()`, un logger et une politique CORS configurable.
 
-Pas encore de décorateurs, d'injection de dépendances, de middlewares, de modules ou d'ORM. La
-v0.1.0 pose les fondations ; l'API pourra encore évoluer.
+Pas encore de décorateurs, d'injection de dépendances, de modules ou d'ORM. L'API pourra encore
+évoluer.
 
 ## Pour démarrer
 
-Il faut **Deno 2**. La version 0.1.0 est vérifiée avec **Deno 2.9.8**. L'installation est décrite
+Il faut **Deno 2**. La version 0.2.0 est vérifiée avec **Deno 2.9.8**. L'installation est décrite
 dans la [documentation Deno](https://docs.deno.com/runtime/getting_started/installation/).
 
 Après avoir cloné ce dépôt, place-toi dans son dossier :
@@ -97,8 +98,10 @@ aucun paquet JSR ou npm n'est publié avec cette version.
 ## Comment ça circule ?
 
 ```text
-Request → Application → Router → Context → Handler → Response
-               └──── gestion centralisée des erreurs ────┘
+Application → résolution du chemin et création du Context
+            → middlewares → handler (ou erreur de routage)
+            ← middlewares ← Response
+            → retrait du corps pour HEAD
 ```
 
 ### Application et controllers
@@ -135,7 +138,8 @@ chemins sont sensibles à la casse et la query string ne participe pas au routag
   en-tête `Allow`.
 - `HEAD` utilise le handler `GET` si aucun handler `HEAD` n'est déclaré, puis retire le corps de la
   réponse. Le handler est bien exécuté : garde tes `GET` sans effet de bord.
-- `OPTIONS` se déclare explicitement ; il n'y a pas de réponse CORS automatique.
+- Sans middleware CORS, `OPTIONS` se déclare explicitement. Avec `cors()`, les preflights sont
+  traités automatiquement ; les autres requêtes `OPTIONS` suivent le routage normal.
 
 Les doublons pour une même méthode sont refusés, y compris `/users/:id` et `/users/:name`.
 L'enregistrement d'un controller est atomique : si une route est invalide, aucune de ses routes
@@ -245,20 +249,148 @@ console.log(await response.json()); // { id: "1", name: "Ada" }
 Importer `mod.ts` ou l'exemple ne démarre aucun serveur. `app.fetch` conserve son instance et peut
 aussi être passé directement à `Deno.serve`.
 
+## Les middlewares
+
+Un middleware entoure la suite du traitement. On l'enregistre avec `app.use()` :
+
+```ts
+import { Application, cors, logger } from "./mod.ts";
+import { UsersController } from "./examples/basic/users.controller.ts";
+
+const app = new Application()
+  .use(logger())
+  .use(cors({ origin: "http://localhost:3000" }))
+  .register(new UsersController());
+```
+
+Le premier enregistré est le premier appelé, et le dernier à récupérer la réponse :
+
+```text
+logger → cors → handler → cors → logger
+```
+
+Les middlewares sont globaux : ils voient aussi les réponses `404`, `405` et les erreurs de chemin.
+Le chemin a déjà été résolu quand ils commencent : `context.params` est disponible pour une route
+trouvée, et vide sinon. Ils utilisent tous le même contexte pour une requête, mais chaque requête a
+son propre contexte et sa propre chaîne.
+
+### Écrire son middleware
+
+```ts
+import type { Middleware } from "./mod.ts";
+
+const poweredBy: Middleware = async (_context, next) => {
+  const response = await next();
+  // On copie les en-têtes : certaines Response natives ont des en-têtes immuables.
+  const headers = new Headers(response.headers);
+  headers.set("X-Powered-By", "MFD");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+};
+```
+
+Quelques règles pour garder les choses simples :
+
+- Renvoyer une `Response`, y compris après `await next()`.
+- Appeler `next()` au plus une fois et attendre sa promesse. Un double appel est une erreur et
+  produit une réponse `500` s'il n'est pas intercepté.
+- Pour couper court, renvoyer directement une réponse sans appeler `next()`.
+- Une exception dans un middleware suit les mêmes règles qu'une exception dans un handler. Une
+  `HttpError` conserve son statut ; une erreur inattendue devient un `500`.
+- `next()` renvoie les erreurs internes sous forme de réponses : les middlewares extérieurs peuvent
+  donc les journaliser ou leur ajouter des en-têtes.
+
+L'ordre compte pour les erreurs aussi. Un middleware peut modifier les réponses des couches placées
+**après lui**, pas une erreur lancée par une couche extérieure. Place le logger en premier, puis le
+CORS, puis tes autres middlewares. Le corps des réponses `HEAD` est supprimé après le retour de
+toute la chaîne.
+
+### Logger
+
+`logger()` écrit la méthode, le chemin, le statut et la durée dans `console.info`. La durée mesure
+le traitement jusqu'à la création de la réponse, sans attendre l'envoi du corps sur le réseau. La
+query string et le corps ne sont pas journalisés par défaut.
+
+Tu peux fournir ta propre sortie synchrone :
+
+```ts
+logger({
+  write: ({ method, path, status, durationMs }) => {
+    console.info({ method, path, status, durationMs });
+  },
+});
+```
+
+Le callback `write` doit être synchrone. S'il lance une exception, c'est une erreur middleware.
+
+### CORS
+
+Le CORS permet à un navigateur de lire les réponses de ton API depuis une autre origine. L'exemple
+autorise `http://localhost:3000`. Pour une configuration plus complète :
+
+```ts
+cors({
+  origin: ["http://localhost:3000", "https://app.example.com"],
+  credentials: true,
+  methods: ["GET", "HEAD", "POST"],
+  allowHeaders: ["Content-Type", "Authorization"],
+  exposeHeaders: ["X-Total-Count"],
+  maxAge: 600,
+});
+```
+
+| Option          | Valeur par défaut                                               |
+| --------------- | --------------------------------------------------------------- |
+| `origin`        | `"*"`, toutes les origines sans credentials                     |
+| `credentials`   | `false`                                                         |
+| `methods`       | Toutes les méthodes de MFD                                      |
+| `allowHeaders`  | `["Content-Type"]`                                              |
+| `exposeHeaders` | `[]`                                                            |
+| `maxAge`        | Non envoyé ; sinon un nombre entier de secondes, positif ou nul |
+
+Les origines explicites sont exactes, sans chemin ni slash final. `credentials: true` avec
+`origin: "*"` est refusé à la configuration. Les noms d'en-têtes doivent être explicites, sans
+wildcard ; leur comparaison ne tient pas compte de la casse.
+
+Un preflight est une requête `OPTIONS` avec `Origin` et `Access-Control-Request-Method`. Il reçoit
+`204` si l'origine, la méthode et les en-têtes demandés sont autorisés, sinon `403`. Le handler
+n'est pas exécuté. La politique est globale : elle ne vérifie pas qu'une route existe pour ce
+chemin. La requête réelle reste soumise au routage habituel.
+
+Les réponses ordinaires d'une origine refusée continuent leur traitement, sans en-tête
+`Access-Control-Allow-Origin`. Les réponses autorisées, erreurs comprises, reçoivent les en-têtes
+CORS. Le middleware conserve les autres en-têtes, complète `Vary` pour les caches et remplace les
+éventuels en-têtes CORS de la réponse par sa propre politique.
+
+Le CORS contrôle ce que le navigateur peut lire. Il ne remplace ni l'authentification, ni les
+autorisations, ni une protection CSRF.
+
+Pour tester le preflight de l'exemple :
+
+```sh
+curl -i -X OPTIONS http://127.0.0.1:8000/users \
+  -H 'Origin: http://localhost:3000' \
+  -H 'Access-Control-Request-Method: POST' \
+  -H 'Access-Control-Request-Headers: Content-Type'
+```
+
 ## Développer MFD
 
-| Commande               | Rôle                                                       |
-| ---------------------- | ---------------------------------------------------------- |
-| `deno task dev`        | Démarrer l'exemple avec redémarrage automatique            |
-| `deno task start`      | Démarrer l'exemple sans surveillance                       |
-| `deno task check`      | Vérifier les types du framework, des exemples et des tests |
-| `deno task test`       | Exécuter les tests sans permission réseau                  |
-| `deno task test:watch` | Relancer les tests à chaque modification                   |
-| `deno task fmt`        | Formater le projet                                         |
-| `deno task lint`       | Analyser le code                                           |
-| `deno task verify`     | Vérifier le formatage, le lint, les types et les tests     |
-| `deno task doc`        | Consulter la documentation publique dans le terminal       |
-| `deno task doc:html`   | Générer la documentation HTML dans `docs/api/`             |
+| Commande               | Rôle                                                             |
+| ---------------------- | ---------------------------------------------------------------- |
+| `deno task dev`        | Démarrer l'exemple avec redémarrage automatique                  |
+| `deno task start`      | Démarrer l'exemple sans surveillance                             |
+| `deno task check`      | Vérifier les types du framework, des exemples et des tests       |
+| `deno task test`       | Exécuter les tests sans permission réseau                        |
+| `deno task test:watch` | Relancer les tests à chaque modification                         |
+| `deno task fmt`        | Formater le projet                                               |
+| `deno task lint`       | Analyser le code                                                 |
+| `deno task verify`     | Vérifier le formatage, le lint, les types, les tests et la JSDoc |
+| `deno task doc`        | Consulter la documentation publique dans le terminal             |
+| `deno task doc:html`   | Générer la documentation HTML dans `docs/api/`                   |
 
 Les commentaires JSDoc suivent le même principe que le projet : expliquer le comportement et les
 petits pièges, sans raconter ce que la ligne de code dit déjà.
@@ -277,6 +409,9 @@ src/
   response.ts                    Conversion des résultats
   http-error.ts                  Erreurs HTTP attendues
   types.ts                       Types partagés
+  middlewares/
+    logger.ts                    Journalisation des requêtes
+    cors.ts                      Politique CORS et preflights
 examples/basic/
   main.ts                        Démarrage de l'exemple
   users.controller.ts            Routes de démonstration
@@ -288,10 +423,18 @@ Aucune dépendance externe pour cette version. Si on en ajoute, le fichier `deno
 
 ## Et ensuite ?
 
-Les pistes sont ouvertes : middlewares, validation des entrées, services et injection de dépendances
-si ça simplifie vraiment l'usage. L'objectif reste le même : une base lisible qu'on peut comprendre
-et faire évoluer sans se perdre.
+Les pistes sont ouvertes : validation des entrées, services et injection de dépendances si ça
+simplifie vraiment l'usage. L'objectif reste le même : une base lisible qu'on peut comprendre et
+faire évoluer sans se perdre.
 
 Pour proposer une évolution ou signaler un problème, ouvre une issue avec un exemple reproductible.
 Pour une contribution, fais passer `deno task verify` et mets à jour la doc si le comportement
 public change.
+
+## Licence
+
+MFD est distribué sous [licence MIT](LICENSE). Tu peux l'utiliser, le modifier, le redistribuer et
+le vendre, y compris dans un projet propriétaire. Il faut conserver le texte de la licence et la
+mention de copyright. Le code est fourni sans garantie.
+
+Les changements de chaque version sont dans le [changelog](CHANGELOG.md).

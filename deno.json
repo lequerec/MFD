@@ -7,7 +7,7 @@
     "test:watch": "deno test --watch",
     "fmt": "deno fmt",
     "lint": "deno lint",
-    "verify": "deno fmt --check && deno lint && deno task check && deno task test",
+    "verify": "deno fmt --check && deno lint && deno task check && deno task test && deno doc --lint mod.ts",
     "doc": "deno doc mod.ts",
     "doc:html": "deno doc --html --output=docs/api mod.ts"
   },
@@ -32,6 +32,7 @@
     "coverage/",
     "docs/api/"
   ],
-  "version": "0.1.0",
-  "exports": "./mod.ts"
+  "version": "0.2.0",
+  "exports": "./mod.ts",
+  "license": "MIT"
 }
