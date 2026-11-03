@@ -1,0 +1,17 @@
+# Variables locales et secrets
+.env
+.env.*
+!.env.example
+
+# Fichiers générés
+coverage/
+node_modules/
+dist/
+
+# Système et éditeurs
+.DS_Store
+*.log
+.idea/
+
+# Documentation générée
+docs/api/

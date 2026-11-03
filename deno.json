@@ -1,0 +1,37 @@
+{
+  "tasks": {
+    "dev": "deno run --allow-net=127.0.0.1:8000 --watch examples/basic/main.ts",
+    "start": "deno run --allow-net=127.0.0.1:8000 examples/basic/main.ts",
+    "check": "deno check mod.ts examples/ tests/",
+    "test": "deno test",
+    "test:watch": "deno test --watch",
+    "fmt": "deno fmt",
+    "lint": "deno lint",
+    "verify": "deno fmt --check && deno lint && deno task check && deno task test",
+    "doc": "deno doc mod.ts",
+    "doc:html": "deno doc --html --output=docs/api mod.ts"
+  },
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true
+  },
+  "fmt": {
+    "indentWidth": 2,
+    "lineWidth": 100,
+    "semiColons": true,
+    "singleQuote": false
+  },
+  "lint": {
+    "rules": {
+      "tags": [
+        "recommended"
+      ]
+    }
+  },
+  "exclude": [
+    "coverage/",
+    "docs/api/"
+  ],
+  "version": "0.1.0",
+  "exports": "./mod.ts"
+}
